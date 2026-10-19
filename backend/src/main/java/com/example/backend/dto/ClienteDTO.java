@@ -98,5 +98,6 @@ public class ClienteDTO {
         private boolean activo;
         private Date creadoEn;
         private List<DireccionDTO> direccionesAdicionales;
+        private Date ultimoPedidoEn;
     }
 }

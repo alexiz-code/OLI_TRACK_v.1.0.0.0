@@ -67,6 +67,12 @@ public class UsuarioController {
         return usuarioService.desactivar(id).thenReturn(ResponseEntity.noContent().build());
     }
 
+    @org.springframework.web.bind.annotation.PatchMapping("/{id}/reactivar")
+    @PreAuthorize("hasRole('ADMINISTRADOR')")
+    public Mono<ResponseEntity<Void>> reactivar(@PathVariable String id) {
+        return usuarioService.reactivar(id).thenReturn(ResponseEntity.noContent().build());
+    }
+
     /** HU-008: genera un enlace de restablecimiento de contraseña de Firebase. */
     @org.springframework.web.bind.annotation.PostMapping("/{id}/restablecer-password")
     @org.springframework.security.access.prepost.PreAuthorize("hasAnyRole('ADMINISTRADOR', 'SUPERVISOR')")

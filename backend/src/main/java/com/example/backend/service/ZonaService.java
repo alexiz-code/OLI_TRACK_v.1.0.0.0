@@ -30,11 +30,16 @@ public class ZonaService {
     }
 
     public Flux<ZonaDTO.Response> listar() {
+        return zonaRepository.findByField("activa", true).map(this::aDTO);
+    }
+
+    public Flux<ZonaDTO.Response> listarTodas() {
         return zonaRepository.findAll().map(this::aDTO);
     }
 
     public Mono<ZonaDTO.Response> obtenerPorId(String id) {
         return zonaRepository.findById(id)
+                .filter(Zona::isActiva)
                 .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Zona", id)))
                 .map(this::aDTO);
     }

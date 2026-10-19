@@ -1,11 +1,13 @@
 package com.example.backend.service;
 
 import com.example.backend.dto.NotificacionDTO;
+import com.example.backend.exception.ApiException;
 import com.example.backend.exception.RecursoNoEncontradoException;
 import com.example.backend.mapper.EntityMapper;
 import com.example.backend.model.Notificacion;
 import com.example.backend.repository.NotificacionRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.http.HttpStatus;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -38,10 +40,14 @@ public class NotificacionService {
         return notificacionRepository.findByDestinatarioUsuarioId(usuarioId).map(mapper::toDTO);
     }
 
-    public Mono<NotificacionDTO.Response> marcarLeida(String id) {
+    public Mono<NotificacionDTO.Response> marcarLeida(String id, String usuarioId) {
         return notificacionRepository.findById(id)
                 .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Notificación", id)))
                 .flatMap(notificacion -> {
+                    if (!usuarioId.equals(notificacion.getDestinatarioUsuarioId())) {
+                        return Mono.error(new ApiException(HttpStatus.FORBIDDEN,
+                                "No puedes modificar una notificación de otro usuario"));
+                    }
                     notificacion.setLeida(true);
                     return notificacionRepository.save(notificacion);
                 })

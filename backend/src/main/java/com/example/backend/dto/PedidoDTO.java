@@ -28,9 +28,6 @@ public class PedidoDTO {
     @AllArgsConstructor
     public static class CrearRequest {
 
-        @NotBlank(message = "El clienteId es obligatorio")
-        private String clienteId;
-
         @NotBlank(message = "La dirección de entrega es obligatoria")
         private String direccionEntrega;
 
@@ -46,7 +43,6 @@ public class PedidoDTO {
         @Valid
         private List<DetallePedidoDTO> productos;
     }
-
     @Data
     @NoArgsConstructor
     @AllArgsConstructor

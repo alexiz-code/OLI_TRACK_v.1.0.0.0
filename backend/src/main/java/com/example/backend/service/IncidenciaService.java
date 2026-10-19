@@ -1,6 +1,7 @@
 package com.example.backend.service;
 
 import com.example.backend.dto.IncidenciaDTO;
+import com.example.backend.exception.ApiException;
 import com.example.backend.exception.OperacionInvalidaException;
 import com.example.backend.exception.RecursoNoEncontradoException;
 import com.example.backend.mapper.EntityMapper;
@@ -9,6 +10,7 @@ import com.example.backend.model.Incidencia;
 import com.example.backend.repository.IncidenciaRepository;
 import com.example.backend.repository.PedidoRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.http.HttpStatus;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -49,9 +51,16 @@ public class IncidenciaService {
                 .map(mapper::toDTO);
     }
 
-    public Mono<IncidenciaDTO.Response> obtenerPorId(String id) {
+    public Mono<IncidenciaDTO.Response> obtenerPorId(String id, String repartidorId) {
         return incidenciaRepository.findById(id)
                 .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Incidencia", id)))
+                .flatMap(incidencia -> {
+                    if (repartidorId != null && !repartidorId.equals(incidencia.getRepartidorId())) {
+                        return Mono.error(new ApiException(HttpStatus.FORBIDDEN,
+                                "No tienes acceso a esta incidencia"));
+                    }
+                    return Mono.just(incidencia);
+                })
                 .map(mapper::toDTO);
     }
 
@@ -59,8 +68,20 @@ public class IncidenciaService {
         return incidenciaRepository.findAll().map(mapper::toDTO);
     }
 
-    public Flux<IncidenciaDTO.Response> listarPorPedido(String pedidoId) {
-        return incidenciaRepository.findByPedidoId(pedidoId).map(mapper::toDTO);
+    public Flux<IncidenciaDTO.Response> listarPorPedido(String pedidoId, String repartidorId) {
+        Mono<Void> acceso = repartidorId == null
+                ? Mono.empty()
+                : pedidoRepository.findById(pedidoId)
+                        .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Pedido", pedidoId)))
+                        .flatMap(pedido -> repartidorId.equals(pedido.getRepartidorId())
+                                ? Mono.empty()
+                                : Mono.error(new ApiException(HttpStatus.FORBIDDEN,
+                                        "No tienes acceso a las incidencias de este pedido")))
+                        .then();
+        return acceso.thenMany(incidenciaRepository.findByPedidoId(pedidoId)
+                .filter(incidencia -> repartidorId == null
+                        || repartidorId.equals(incidencia.getRepartidorId()))
+                .map(mapper::toDTO));
     }
 
     public Flux<IncidenciaDTO.Response> listarPorRepartidor(String repartidorId) {

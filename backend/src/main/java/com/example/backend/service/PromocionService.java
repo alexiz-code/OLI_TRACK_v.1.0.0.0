@@ -2,6 +2,7 @@ package com.example.backend.service;
 
 import com.example.backend.dto.PromocionDTO;
 import com.example.backend.exception.RecursoNoEncontradoException;
+import com.example.backend.exception.OperacionInvalidaException;
 import com.example.backend.model.Promocion;
 import com.example.backend.repository.PromocionRepository;
 import org.springframework.stereotype.Service;
@@ -21,6 +22,7 @@ public class PromocionService {
     }
 
     public Mono<PromocionDTO.Response> crear(PromocionDTO.Request request) {
+        validarVigencia(request);
         Promocion p = new Promocion();
         aplicar(p, request);
         p.setActiva(true);
@@ -41,6 +43,7 @@ public class PromocionService {
     }
 
     public Mono<PromocionDTO.Response> actualizar(String id, PromocionDTO.Request request) {
+        validarVigencia(request);
         return promocionRepository.findById(id)
                 .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Promoción", id)))
                 .flatMap(p -> {
@@ -65,6 +68,13 @@ public class PromocionService {
         p.setDescripcion(r.getDescripcion());
         p.setVigenteDesde(r.getVigenteDesde());
         p.setVigenteHasta(r.getVigenteHasta());
+    }
+
+    private void validarVigencia(PromocionDTO.Request request) {
+        if (request.getVigenteDesde() != null && request.getVigenteHasta() != null
+                && request.getVigenteHasta().before(request.getVigenteDesde())) {
+            throw new OperacionInvalidaException("La fecha final debe ser igual o posterior a la fecha inicial");
+        }
     }
 
     private PromocionDTO.Response aDTO(Promocion p) {

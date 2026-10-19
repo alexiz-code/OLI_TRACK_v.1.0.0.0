@@ -27,6 +27,7 @@ public class Repartidor implements EntidadFirestore {
     private String usuarioId;
 
     private String placaVehiculo;
+    private String tipoVehiculo = "MOTOCICLETA";
     private EstadoRepartidor estado = EstadoRepartidor.DESCONECTADO;
 
     /** Última ubicación GPS reportada por el repartidor. */

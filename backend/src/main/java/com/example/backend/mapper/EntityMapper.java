@@ -91,7 +91,8 @@ public class EntityMapper {
                 toDTO(model.getUbicacion()),
                 model.isActivo(),
                 model.getCreadoEn(),
-                toDireccionesDTO(model.getDireccionesAdicionales())
+                toDireccionesDTO(model.getDireccionesAdicionales()),
+                null
         );
     }
 
@@ -115,6 +116,7 @@ public class EntityMapper {
         Repartidor repartidor = new Repartidor();
         repartidor.setUsuarioId(dto.getUsuarioId());
         repartidor.setPlacaVehiculo(dto.getPlacaVehiculo());
+        repartidor.setTipoVehiculo("MOTOCICLETA");
         repartidor.setActivo(true);
         return repartidor;
     }
@@ -127,6 +129,7 @@ public class EntityMapper {
                 model.getId(),
                 model.getUsuarioId(),
                 model.getPlacaVehiculo(),
+                model.getTipoVehiculo() != null ? model.getTipoVehiculo() : "MOTOCICLETA",
                 model.getEstado(),
                 toDTO(model.getUbicacionActual()),
                 model.isActivo(),

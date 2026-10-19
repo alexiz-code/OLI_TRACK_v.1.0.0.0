@@ -32,12 +32,13 @@ public class ClienteController {
     @PostMapping
     @PreAuthorize("hasRole('CLIENTE')")
     public Mono<ResponseEntity<ClienteDTO.Response>> crear(@Valid @RequestBody ClienteDTO.CrearRequest request) {
-        return clienteService.crear(request)
+        return SecurityContextUtils.usuarioActual()
+                .flatMap(actual -> clienteService.crear(actual.getUid(), request))
                 .map(dto -> ResponseEntity.status(HttpStatus.CREATED).body(dto));
     }
 
     @GetMapping
-    @PreAuthorize("hasAnyRole('ADMINISTRADOR', 'SUPERVISOR')")
+    @PreAuthorize("hasAnyRole('ADMINISTRADOR', 'SUPERVISOR', 'REPARTIDOR')")
     public Flux<ClienteDTO.Response> listar() {
         return clienteService.listar();
     }
@@ -50,7 +51,7 @@ public class ClienteController {
     }
 
     @GetMapping("/{id}")
-    @PreAuthorize("hasAnyRole('ADMINISTRADOR', 'SUPERVISOR', 'REPARTIDOR')")
+    @PreAuthorize("hasAnyRole('ADMINISTRADOR', 'SUPERVISOR')")
     public Mono<ClienteDTO.Response> obtenerPorId(@PathVariable String id) {
         return clienteService.obtenerPorId(id);
     }

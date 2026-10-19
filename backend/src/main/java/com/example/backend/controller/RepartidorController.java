@@ -3,6 +3,7 @@ package com.example.backend.controller;
 import com.example.backend.dto.RepartidorDTO;
 import com.example.backend.dto.UbicacionDTO;
 import com.example.backend.security.SecurityContextUtils;
+import com.example.backend.service.PedidoService;
 import com.example.backend.service.RepartidorService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -25,9 +26,11 @@ import reactor.core.publisher.Mono;
 public class RepartidorController {
 
     private final RepartidorService repartidorService;
+    private final PedidoService pedidoService;
 
-    public RepartidorController(RepartidorService repartidorService) {
+    public RepartidorController(RepartidorService repartidorService, PedidoService pedidoService) {
         this.repartidorService = repartidorService;
+        this.pedidoService = pedidoService;
     }
 
     @PostMapping
@@ -76,7 +79,10 @@ public class RepartidorController {
     public Mono<RepartidorDTO.Response> cambiarEstadoPropio(@Valid @RequestBody RepartidorDTO.EstadoRequest request) {
         return SecurityContextUtils.usuarioActual()
                 .flatMap(actual -> repartidorService.obtenerPorUsuarioId(actual.getUid()))
-                .flatMap(perfil -> repartidorService.cambiarEstado(perfil.getId(), request.getEstado()));
+                .flatMap(perfil -> repartidorService.cambiarEstado(perfil.getId(), request.getEstado()))
+                .flatMap(perfil -> request.getEstado() == com.example.backend.model.EstadoRepartidor.DISPONIBLE
+                        ? pedidoService.asignarPedidosSinRepartidor().thenReturn(perfil)
+                        : Mono.just(perfil));
     }
 
     @DeleteMapping("/{id}")
@@ -91,14 +97,18 @@ public class RepartidorController {
     public Mono<RepartidorDTO.Response> actualizarUbicacion(@PathVariable String id,
                                                               @Valid @RequestBody UbicacionDTO ubicacion) {
         return SecurityContextUtils.usuarioActual()
-                .flatMap(actual -> repartidorService.actualizarUbicacion(id, actual.getUid(), ubicacion));
+                .flatMap(actual -> repartidorService.actualizarUbicacion(id, actual.getUid(), ubicacion))
+                .flatMap(perfil -> perfil.getEstado() == com.example.backend.model.EstadoRepartidor.DISPONIBLE
+                        ? pedidoService.asignarPedidosSinRepartidor().thenReturn(perfil)
+                        : Mono.just(perfil));
     }
 
     /** Consultado por Angular para pintar al repartidor en el mapa y calcular ETA. */
     @GetMapping("/{id}/ubicacion")
     @PreAuthorize("hasAnyRole('ADMINISTRADOR', 'SUPERVISOR', 'CLIENTE', 'REPARTIDOR')")
     public Mono<UbicacionDTO> obtenerUbicacion(@PathVariable String id) {
-        return repartidorService.obtenerUbicacion(id);
+        return SecurityContextUtils.usuarioActual()
+                .flatMap(actual -> repartidorService.obtenerUbicacion(id, actual.getUid(), actual.getRol()));
     }
 
     @org.springframework.web.bind.annotation.PatchMapping("/{id}/reactivar")

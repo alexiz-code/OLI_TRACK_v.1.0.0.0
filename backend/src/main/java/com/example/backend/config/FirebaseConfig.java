@@ -2,12 +2,13 @@ package com.example.backend.config;
 
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.firestore.Firestore;
-// import com.google.cloud.storage.Bucket;
+import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageOptions;
 import com.google.firebase.FirebaseApp;
 import com.google.firebase.FirebaseOptions;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.cloud.FirestoreClient;
-// import com.google.firebase.cloud.StorageClient;
+import com.google.firebase.cloud.StorageClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -38,7 +39,12 @@ public class FirebaseConfig {
     }
 
     @Bean
-    public FirebaseApp firebaseApp() throws IOException {
+    public GoogleCredentials googleCredentials() throws IOException {
+        return resolveCredentials();
+    }
+
+    @Bean
+    public FirebaseApp firebaseApp(GoogleCredentials credentials) throws IOException {
 
         List<FirebaseApp> existingApps = FirebaseApp.getApps();
 
@@ -52,11 +58,10 @@ public class FirebaseConfig {
             }
         }
 
-        GoogleCredentials credentials = resolveCredentials();
-
         FirebaseOptions options = FirebaseOptions.builder()
                 .setCredentials(credentials)
                 .setProjectId(properties.getProjectId())
+                .setStorageBucket(properties.getStorageBucket())
                 .build();
 
         FirebaseApp app = FirebaseApp.initializeApp(
@@ -83,12 +88,16 @@ public class FirebaseConfig {
         return FirebaseAuth.getInstance(firebaseApp);
     }
 
-    /*
     @Bean
-    public Bucket storageBucket(FirebaseApp firebaseApp) {
-        return StorageClient.getInstance(firebaseApp).bucket();
+    public Storage cloudStorage(FirebaseApp firebaseApp, GoogleCredentials credentials) {
+        // Deferir la consulta remota del bucket hasta que se suba un archivo.
+        // Si el bucket no existe, no debe impedir que arranque toda la API.
+        return StorageOptions.newBuilder()
+                .setProjectId(firebaseApp.getOptions().getProjectId())
+                .setCredentials(credentials)
+                .build()
+                .getService();
     }
-    */
 
     private GoogleCredentials resolveCredentials() throws IOException {
 

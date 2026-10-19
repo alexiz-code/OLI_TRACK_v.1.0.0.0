@@ -343,6 +343,20 @@ public class UsuarioService {
                 .then();
     }
 
+    public Mono<Void> reactivar(String id) {
+        return usuarioRepository.findById(id)
+                .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Usuario", id)))
+                .flatMap(usuario -> ReactiveFirebase.defer(() -> firebaseAuth.updateUserAsync(
+                                new UserRecord.UpdateRequest(usuario.getId()).setDisabled(false)))
+                        .then(Mono.defer(() -> {
+                            usuario.setActivo(true);
+                            return usuarioRepository.save(usuario);
+                        }))
+                        .flatMap(actualizado -> auditService.registrarActual(
+                                "USUARIO_REACTIVADO", "usuario", actualizado.getId(), actualizado.getEmail())))
+                .then();
+    }
+
     /**
      * Cambia el rol de un usuario.
      */

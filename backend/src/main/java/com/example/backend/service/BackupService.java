@@ -26,7 +26,8 @@ public class BackupService {
             Colecciones.USUARIOS, Colecciones.CLIENTES, Colecciones.REPARTIDORES, Colecciones.PRODUCTOS,
             Colecciones.INVENTARIOS, Colecciones.PEDIDOS, Colecciones.DETALLE_PEDIDOS, Colecciones.INCIDENCIAS,
             Colecciones.KARDEX, Colecciones.CONSULTAS, Colecciones.NOTIFICACIONES, Colecciones.ZONAS,
-            Colecciones.CONFIGURACION, Colecciones.AUDITORIA, Colecciones.PROMOCIONES, Colecciones.FAQS);
+            Colecciones.OPERACIONES_STOCK_PEDIDOS, Colecciones.CONFIGURACION, Colecciones.AUDITORIA,
+            Colecciones.PROMOCIONES, Colecciones.FAQS);
 
     private final Firestore firestore;
     private final AuditService auditService;

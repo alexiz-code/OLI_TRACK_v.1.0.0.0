@@ -6,6 +6,7 @@ import com.example.backend.dto.PedidoDTO;
 import com.example.backend.exception.ApiException;
 import com.example.backend.exception.OperacionInvalidaException;
 import com.example.backend.exception.RecursoNoEncontradoException;
+import com.example.backend.config.FirebaseProperties;
 import com.example.backend.mapper.EntityMapper;
 import com.example.backend.model.Calificacion;
 import com.example.backend.model.ConfiguracionEmpresa;
@@ -19,6 +20,7 @@ import com.example.backend.model.Producto;
 import com.example.backend.model.Repartidor;
 import com.example.backend.model.Rol;
 import com.example.backend.model.TipoIncidencia;
+import com.example.backend.model.Ubicacion;
 import com.example.backend.repository.ClienteRepository;
 import com.example.backend.repository.DetallePedidoRepository;
 import com.example.backend.repository.PedidoRepository;
@@ -26,11 +28,9 @@ import com.example.backend.repository.ProductoRepository;
 import com.example.backend.repository.RepartidorRepository;
 import com.example.backend.security.SecurityContextUtils;
 import com.example.backend.security.UsuarioAutenticado;
-
-// Firebase Storage
-// import com.google.cloud.storage.Acl;
-// import com.google.cloud.storage.Blob;
-// import com.google.cloud.storage.Bucket;
+import com.google.cloud.storage.Blob;
+import com.google.cloud.storage.BlobInfo;
+import com.google.cloud.storage.Storage;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -38,8 +38,7 @@ import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-// Firebase Storage
-// import reactor.core.scheduler.Schedulers;
+import reactor.core.scheduler.Schedulers;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -47,11 +46,21 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.time.DayOfWeek;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.UUID;
+import java.text.Normalizer;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 
 @Service
 public class PedidoService {
@@ -67,8 +76,8 @@ public class PedidoService {
     private final ConfiguracionService configuracionService;
     private final IncidenciaService incidenciaService;
 
-    // Firebase Storage
-    // private final Bucket bucket;
+    private final Storage storage;
+    private final String storageBucketName;
 
     private final EntityMapper mapper;
 
@@ -81,8 +90,8 @@ public class PedidoService {
                          NotificacionService notificacionService,
                          ConfiguracionService configuracionService,
                          IncidenciaService incidenciaService,
-                         // Firebase Storage
-                         // Bucket bucket,
+                         Storage storage,
+                         FirebaseProperties firebaseProperties,
                          EntityMapper mapper) {
         this.pedidoRepository = pedidoRepository;
         this.detallePedidoRepository = detallePedidoRepository;
@@ -93,8 +102,8 @@ public class PedidoService {
         this.notificacionService = notificacionService;
         this.configuracionService = configuracionService;
         this.incidenciaService = incidenciaService;
-        // Firebase Storage
-        // this.bucket = bucket;
+        this.storage = storage;
+        this.storageBucketName = firebaseProperties.getStorageBucket();
         this.mapper = mapper;
     }
 
@@ -138,7 +147,15 @@ public class PedidoService {
                                 .flatMap(linea -> resolverLinea(linea)
                                         .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Producto", linea.getProductoId()))))
                                 .collectList()
-                                .flatMap(lineas -> construirYGuardar(clienteId, request, cfg, lineas))));
+                                .flatMap(lineas -> construirYGuardar(clienteId, request, cfg, lineas)
+                                        .flatMap(pedido -> pedido.getUbicacionEntrega() == null
+                                                ? Mono.just(pedido)
+                                                : asignarRepartidorAutomatico(pedido.getId())
+                                                        .onErrorResume(OperacionInvalidaException.class, error ->
+                                                                error.getMessage() != null
+                                                                        && error.getMessage().startsWith("No hay repartidores disponibles")
+                                                                        ? Mono.just(pedido)
+                                                                        : Mono.error(error))))));
     }
 
     private Mono<Void> validarPedidoPermitido(ConfiguracionEmpresa cfg, PedidoDTO.CrearRequest request) {
@@ -156,7 +173,11 @@ public class PedidoService {
 
     private boolean dentroDeHorario(ConfiguracionEmpresa cfg) {
         try {
-            LocalTime ahora = LocalTime.now(ZONA_LIMA);
+            java.time.ZonedDateTime ahoraLocal = java.time.ZonedDateTime.now(ZONA_LIMA);
+            if (!diaAtendido(cfg.getDiasAtencion(), ahoraLocal.getDayOfWeek())) {
+                return false;
+            }
+            LocalTime ahora = ahoraLocal.toLocalTime();
             LocalTime apertura = LocalTime.parse(cfg.getHorarioApertura());
             LocalTime cierre = LocalTime.parse(cfg.getHorarioCierre());
             if (apertura.isBefore(cierre)) {
@@ -164,8 +185,51 @@ public class PedidoService {
             }
             return !ahora.isBefore(apertura) || !ahora.isAfter(cierre);
         } catch (Exception e) {
-            return true;
+            return false;
         }
+    }
+
+    private boolean diaAtendido(String diasAtencion, DayOfWeek hoy) {
+        if (!StringUtils.hasText(diasAtencion)) {
+            return false;
+        }
+        String normalizado = Normalizer.normalize(diasAtencion, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "")
+                .toLowerCase(Locale.ROOT);
+        Pattern patron = Pattern.compile("lunes|martes|miercoles|jueves|viernes|sabado|domingo");
+        Matcher matcher = patron.matcher(normalizado);
+        List<DayOfWeek> dias = new ArrayList<>();
+        while (matcher.find()) {
+            DayOfWeek dia = switch (matcher.group()) {
+                case "lunes" -> DayOfWeek.MONDAY;
+                case "martes" -> DayOfWeek.TUESDAY;
+                case "miercoles" -> DayOfWeek.WEDNESDAY;
+                case "jueves" -> DayOfWeek.THURSDAY;
+                case "viernes" -> DayOfWeek.FRIDAY;
+                case "sabado" -> DayOfWeek.SATURDAY;
+                default -> DayOfWeek.SUNDAY;
+            };
+            if (!dias.contains(dia)) {
+                dias.add(dia);
+            }
+        }
+        if (dias.isEmpty()) {
+            return false;
+        }
+        if (normalizado.matches(".*\\b(a|hasta)\\b.*") && dias.size() == 2) {
+            DayOfWeek actual = dias.get(0);
+            for (int i = 0; i < 7; i++) {
+                if (actual == hoy) {
+                    return true;
+                }
+                if (actual == dias.get(1)) {
+                    break;
+                }
+                actual = actual.plus(1);
+            }
+            return hoy == dias.get(1);
+        }
+        return dias.contains(hoy);
     }
 
     private Mono<PedidoDTO.Response> construirYGuardar(String clienteId,
@@ -187,40 +251,53 @@ public class PedidoService {
         pedido.setCostoEnvio(BigDecimal.ZERO);
         pedido.setTiempoEstimadoMinutos(cfg.getTiempoEstimadoEntregaMinutos());
 
-        return uidActual()
-                .flatMap(uid -> {
-                    agregarHistorial(pedido, EstadoPedido.PENDIENTE, uid, "Pedido registrado");
-                    return pedidoRepository.save(pedido);
-                })
-                .flatMap(guardado -> guardarDetalle(guardado, lineas)
-                        .then(descontarStock(lineas))
-                        .then(notificarCliente(
-                                guardado,
-                                "Pedido registrado",
-                                "Recibimos tu pedido #" + corto(guardado.getId()) + ". Te avisaremos cuando cambie de estado."
-                        ))
-                        .thenReturn(mapper.toDTO(guardado, lineas)));
+        // Se fija el ID antes de reservar para que la reserva y su compensación sean idempotentes.
+        pedido.setId(UUID.randomUUID().toString());
+        Map<String, Integer> cantidades = cantidadesPorProducto(lineas);
+        return inventarioService.aplicarMovimientoPedido(
+                        pedido.getId(), cantidades, true, "Reserva automática por pedido")
+                .then(Mono.defer(() -> uidActual()
+                        .flatMap(uid -> {
+                            agregarHistorial(pedido, EstadoPedido.PENDIENTE, uid, "Pedido registrado");
+                            return pedidoRepository.save(pedido);
+                        })
+                        .flatMap(guardado -> guardarDetalle(guardado, lineas)
+                                .then(notificarCliente(
+                                        guardado,
+                                        "Pedido registrado",
+                                        "Recibimos tu pedido #" + corto(guardado.getId()) + ". Te avisaremos cuando cambie de estado."
+                                ))
+                                .thenReturn(mapper.toDTO(guardado, lineas)))
+                        .onErrorResume(error -> limpiarPedidoFallido(pedido.getId(), cantidades, error))));
     }
 
     private Mono<DetallePedidoDTO> resolverLinea(DetallePedidoDTO linea) {
         return productoRepository.findById(linea.getProductoId())
-                .filter(Producto::isActivo)
-                .map(producto -> {
+                .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Producto", linea.getProductoId())))
+                .flatMap(producto -> {
+                    if (!producto.isActivo()) {
+                        return Mono.error(new OperacionInvalidaException(
+                                "El producto " + producto.getNombre() + " no está disponible"));
+                    }
+                    if (linea.getCantidad() == null || linea.getCantidad() <= 0) {
+                        return Mono.error(new OperacionInvalidaException(
+                                "La cantidad debe ser mayor que cero para " + producto.getNombre()));
+                    }
                     BigDecimal subtotal = producto.getPrecioUnitario()
                             .multiply(BigDecimal.valueOf(linea.getCantidad()));
-                    return new DetallePedidoDTO(
+                    return Mono.just(new DetallePedidoDTO(
                             null,
                             producto.getId(),
                             linea.getCantidad(),
                             producto.getPrecioUnitario(),
                             subtotal
-                    );
+                    ));
                 });
     }
 
     private Mono<Void> guardarDetalle(Pedido pedido, List<DetallePedidoDTO> lineas) {
         return Flux.fromIterable(lineas)
-                .flatMap(linea -> {
+                .concatMap(linea -> {
                     DetallePedido detalle = new DetallePedido();
                     detalle.setPedidoId(pedido.getId());
                     detalle.setProductoId(linea.getProductoId());
@@ -232,13 +309,26 @@ public class PedidoService {
                 .then();
     }
 
-    private Mono<Void> descontarStock(List<DetallePedidoDTO> lineas) {
-        return Flux.fromIterable(lineas)
-                .concatMap(linea -> inventarioService.descontarPorProducto(
-                        linea.getProductoId(),
-                        linea.getCantidad()
-                ))
-                .then();
+    private Map<String, Integer> cantidadesPorProducto(List<DetallePedidoDTO> lineas) {
+        Map<String, Integer> cantidades = new LinkedHashMap<>();
+        for (DetallePedidoDTO linea : lineas) {
+            cantidades.merge(linea.getProductoId(), linea.getCantidad(), Math::addExact);
+        }
+        return cantidades;
+    }
+
+    private Mono<PedidoDTO.Response> limpiarPedidoFallido(String pedidoId,
+                                                          Map<String, Integer> cantidades,
+                                                          Throwable error) {
+        return detallePedidoRepository.deleteByPedidoId(pedidoId)
+                .onErrorResume(limpiezaError -> Mono.empty())
+                .then(pedidoRepository.deleteById(pedidoId).onErrorResume(limpiezaError -> Mono.empty()))
+                .then(inventarioService.aplicarMovimientoPedido(
+                        "compensacion-" + pedidoId,
+                        cantidades,
+                        false,
+                        "Reposición por fallo al crear el pedido " + corto(pedidoId)))
+                .then(Mono.error(error));
     }
 
     // =====================================================================
@@ -394,21 +484,17 @@ public class PedidoService {
                                     && e != EstadoPedido.CONFIRMADO
                                     && e != EstadoPedido.EN_PREPARACION) {
                                 return Mono.error(new OperacionInvalidaException(
-                                        "Solo se puede asignar repartidor a pedidos PENDIENTE, CONFIRMADO o EN_PREPARACION"
+                                    "Solo se puede asignar repartidor a pedidos PENDIENTE, CONFIRMADO o EN_PREPARACION"
                                 ));
                             }
-
-                            return repartidorRepository.findById(repartidorId)
-                                    .switchIfEmpty(Mono.error(
-                                            RecursoNoEncontradoException.de("Repartidor", repartidorId)
-                                    ))
+                            if (repartidorId.equals(pedido.getRepartidorId())) {
+                                return Mono.just(pedido);
+                            }
+                            return repartidorRepository.reclamarDisponible(repartidorId)
+                                    .onErrorMap(IllegalStateException.class,
+                                            error -> new OperacionInvalidaException(error.getMessage()))
                                     .flatMap(repartidor -> {
-                                        if (!repartidor.isActivo()) {
-                                            return Mono.error(new OperacionInvalidaException(
-                                                    "El repartidor está desactivado"
-                                            ));
-                                        }
-
+                                        String anterior = pedido.getRepartidorId();
                                         pedido.setRepartidorId(repartidor.getId());
                                         pedido.setEntregaAceptada(false);
 
@@ -429,20 +515,94 @@ public class PedidoService {
                                                 "Repartidor asignado: " + corto(repartidor.getId())
                                         );
 
-                                        return pedidoRepository.save(pedido);
+                                        return pedidoRepository.save(pedido)
+                                                .flatMap(guardado -> liberarRepartidorSiLibre(anterior)
+                                                        .thenReturn(guardado))
+                                                .onErrorResume(error -> liberarRepartidorSiLibre(repartidorId)
+                                                        .then(Mono.error(error)));
                                     });
                         })
                         .flatMap(this::enriquecer));
     }
 
     public Mono<PedidoDTO.Response> asignarRepartidorAutomatico(String pedidoId) {
-        return repartidorRepository.findByEstado(EstadoRepartidor.DISPONIBLE)
-                .filter(Repartidor::isActivo)
-                .next()
-                .switchIfEmpty(Mono.error(new OperacionInvalidaException(
-                        "No hay repartidores disponibles en este momento"
-                )))
-                .flatMap(repartidor -> asignarRepartidor(pedidoId, repartidor.getId()));
+        return buscar(pedidoId)
+                .flatMap(pedido -> {
+                    if (StringUtils.hasText(pedido.getRepartidorId())) {
+                        return Mono.error(new OperacionInvalidaException(
+                                "El pedido ya tiene un repartidor asignado"));
+                    }
+                    if (pedido.getEstado() != EstadoPedido.PENDIENTE
+                            && pedido.getEstado() != EstadoPedido.CONFIRMADO
+                            && pedido.getEstado() != EstadoPedido.EN_PREPARACION) {
+                        return Mono.error(new OperacionInvalidaException(
+                                "El pedido ya no está disponible para asignación"));
+                    }
+                    Ubicacion destino = pedido.getUbicacionEntrega();
+                    if (!coordenadasValidas(destino)) {
+                        return Mono.error(new OperacionInvalidaException(
+                                "El pedido no tiene coordenadas para calcular la cercanía"));
+                    }
+                    return repartidorRepository.findByEstado(EstadoRepartidor.DISPONIBLE)
+                            .filter(Repartidor::isActivo)
+                            .filter(repartidor -> coordenadasValidas(
+                                    repartidor.getUbicacionActual()))
+                            .collectList()
+                            .flatMapMany(disponibles -> Flux.fromIterable(disponibles.stream()
+                                    .sorted(Comparator.comparingDouble(repartidor ->
+                                            distanciaMetros(destino, repartidor.getUbicacionActual())))
+                                    .toList()))
+                            .concatMap(repartidor -> asignarRepartidor(pedidoId, repartidor.getId())
+                                    .onErrorResume(OperacionInvalidaException.class, error ->
+                                            error.getMessage() != null
+                                                    && error.getMessage().contains("no está activo y disponible")
+                                                    ? Mono.empty()
+                                                    : Mono.error(error)))
+                            .next()
+                            .switchIfEmpty(Mono.error(new OperacionInvalidaException(
+                                    "No hay repartidores disponibles con ubicación GPS")));
+                });
+    }
+
+    /**
+     * Reintenta asignar pedidos vigentes cuando un repartidor reporta GPS
+     * o se pone disponible después de que se creó el pedido.
+     */
+    public Mono<Void> asignarPedidosSinRepartidor() {
+        return pedidoRepository.findAll()
+                .filter(pedido -> !StringUtils.hasText(pedido.getRepartidorId()))
+                .filter(pedido -> pedido.getEstado() == EstadoPedido.PENDIENTE
+                        || pedido.getEstado() == EstadoPedido.CONFIRMADO
+                        || pedido.getEstado() == EstadoPedido.EN_PREPARACION)
+                .filter(pedido -> coordenadasValidas(pedido.getUbicacionEntrega()))
+                .concatMap(pedido -> asignarRepartidorAutomatico(pedido.getId())
+                        .onErrorResume(OperacionInvalidaException.class, error ->
+                                error.getMessage() != null
+                                        && error.getMessage().startsWith("No hay repartidores disponibles")
+                                        ? Mono.empty()
+                                        : Mono.error(error)))
+                .then();
+    }
+
+    private boolean coordenadasValidas(Ubicacion ubicacion) {
+        return ubicacion != null
+                && ubicacion.getLatitud() != null
+                && ubicacion.getLongitud() != null
+                && Double.isFinite(ubicacion.getLatitud())
+                && Double.isFinite(ubicacion.getLongitud())
+                && ubicacion.getLatitud() >= -90 && ubicacion.getLatitud() <= 90
+                && ubicacion.getLongitud() >= -180 && ubicacion.getLongitud() <= 180;
+    }
+
+    private double distanciaMetros(Ubicacion origen, Ubicacion destino) {
+        double latitud1 = Math.toRadians(origen.getLatitud());
+        double latitud2 = Math.toRadians(destino.getLatitud());
+        double deltaLatitud = latitud2 - latitud1;
+        double deltaLongitud = Math.toRadians(destino.getLongitud() - origen.getLongitud());
+        double a = Math.sin(deltaLatitud / 2) * Math.sin(deltaLatitud / 2)
+                + Math.cos(latitud1) * Math.cos(latitud2)
+                * Math.sin(deltaLongitud / 2) * Math.sin(deltaLongitud / 2);
+        return 6_371_000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
     public Mono<PedidoDTO.Response> reasignar(String pedidoId, String nuevoRepartidorId, String comentario) {
@@ -470,17 +630,10 @@ public class PedidoService {
 
                             String anterior = pedido.getRepartidorId();
 
-                            return repartidorRepository.findById(nuevoRepartidorId)
-                                    .switchIfEmpty(Mono.error(
-                                            RecursoNoEncontradoException.de("Repartidor", nuevoRepartidorId)
-                                    ))
+                            return repartidorRepository.reclamarDisponible(nuevoRepartidorId)
+                                    .onErrorMap(IllegalStateException.class,
+                                            error -> new OperacionInvalidaException(error.getMessage()))
                                     .flatMap(nuevo -> {
-                                        if (!nuevo.isActivo()) {
-                                            return Mono.error(new OperacionInvalidaException(
-                                                    "El repartidor está desactivado"
-                                            ));
-                                        }
-
                                         pedido.setRepartidorId(nuevo.getId());
                                         pedido.setEntregaAceptada(false);
 
@@ -492,21 +645,11 @@ public class PedidoService {
                                                         + (StringUtils.hasText(comentario) ? ": " + comentario : "")
                                         );
 
-                                        Mono<Void> ajustes = Mono.empty();
-
-                                        if (pedido.getEstado() == EstadoPedido.EN_CAMINO) {
-                                            ajustes = actualizarEstadoRepartidor(
-                                                    anterior,
-                                                    EstadoRepartidor.DISPONIBLE
-                                            ).then().then(
-                                                    actualizarEstadoRepartidor(
-                                                            nuevo.getId(),
-                                                            EstadoRepartidor.EN_RUTA
-                                                    ).then()
-                                            );
-                                        }
-
-                                        return ajustes.then(pedidoRepository.save(pedido));
+                                        return pedidoRepository.save(pedido)
+                                                .flatMap(guardado -> liberarRepartidorSiLibre(anterior)
+                                                        .thenReturn(guardado))
+                                                .onErrorResume(error -> liberarRepartidorSiLibre(nuevo.getId())
+                                                        .then(Mono.error(error)));
                                     });
                         })
                         .flatMap(this::enriquecer));
@@ -554,6 +697,15 @@ public class PedidoService {
                                 return Mono.error(new OperacionInvalidaException(
                                         "Primero debes aceptar la entrega"
                                 ));
+                            }
+                            if (nuevoEstado == EstadoPedido.EN_CAMINO
+                                    && pedido.getEstado() == EstadoPedido.CONFIRMADO) {
+                                return cambiarEstado(
+                                                pedidoId,
+                                                EstadoPedido.EN_PREPARACION,
+                                                "Pedido pasa a preparación antes de salir a ruta"
+                                        )
+                                        .then(cambiarEstado(pedidoId, nuevoEstado, comentario));
                             }
                             return cambiarEstado(pedidoId, nuevoEstado, comentario);
                         })));
@@ -623,51 +775,64 @@ public class PedidoService {
     }
 
     private Mono<Pedido> aplicarEfectosSecundarios(Pedido pedido, EstadoPedido nuevoEstado) {
-        return pedidoRepository.save(pedido)
+        Mono<Void> movimientoStock = nuevoEstado == EstadoPedido.CANCELADO
+                ? reponerStock(pedido)
+                : Mono.empty();
+
+        return movimientoStock.then(pedidoRepository.save(pedido))
                 .flatMap(guardado -> {
                     Mono<Void> efectos = Mono.empty();
-
-                    if (nuevoEstado == EstadoPedido.CANCELADO) {
-                        efectos = reponerStock(guardado);
-                    }
 
                     if (StringUtils.hasText(guardado.getRepartidorId())) {
                         EstadoRepartidor estadoRepartidor = switch (nuevoEstado) {
                             case EN_CAMINO -> EstadoRepartidor.EN_RUTA;
-                            case ENTREGADO, ENTREGA_FALLIDA, CANCELADO -> EstadoRepartidor.DISPONIBLE;
+                            case ENTREGADO, CANCELADO -> EstadoRepartidor.DISPONIBLE;
                             default -> null;
                         };
 
                         if (estadoRepartidor != null) {
-                            efectos = efectos.then(
-                                    actualizarEstadoRepartidor(
-                                            guardado.getRepartidorId(),
-                                            estadoRepartidor
-                                    ).then()
-                            );
+                            efectos = efectos.then(estadoRepartidor == EstadoRepartidor.DISPONIBLE
+                                    ? liberarRepartidorSiLibre(guardado.getRepartidorId())
+                                    : actualizarEstadoRepartidor(guardado.getRepartidorId(), estadoRepartidor).then());
                         }
                     }
 
                     return efectos.thenReturn(guardado);
-                });
+        });
+    }
+
+    private Mono<Void> liberarRepartidorSiLibre(String repartidorId) {
+        if (!StringUtils.hasText(repartidorId)) {
+            return Mono.empty();
+        }
+        return pedidoRepository.findByRepartidorId(repartidorId)
+                .filter(pedido -> pedido.getEstado() != EstadoPedido.ENTREGADO
+                        && pedido.getEstado() != EstadoPedido.CANCELADO)
+                .hasElements()
+                .flatMap(tienePedidosActivos -> tienePedidosActivos
+                        ? Mono.empty()
+                        : actualizarEstadoRepartidor(repartidorId, EstadoRepartidor.DISPONIBLE).then());
     }
 
     private Mono<Void> reponerStock(Pedido pedido) {
         return detallePedidoRepository.findByPedidoId(pedido.getId())
-                .concatMap(d -> inventarioService.reponerPorProducto(
-                        d.getProductoId(),
-                        d.getCantidad(),
-                        "Reposición por cancelación del pedido #" + corto(pedido.getId())
-                ))
-                .then();
+                .collectList()
+                .flatMap(detalles -> {
+                    Map<String, Integer> cantidades = new LinkedHashMap<>();
+                    for (DetallePedido detalle : detalles) {
+                        cantidades.merge(detalle.getProductoId(), detalle.getCantidad(), Math::addExact);
+                    }
+                    return inventarioService.aplicarMovimientoPedido(
+                            pedido.getId(),
+                            cantidades,
+                            false,
+                            "Reposición por cancelación del pedido #" + corto(pedido.getId()));
+                });
     }
 
     private Mono<Repartidor> actualizarEstadoRepartidor(String repartidorId, EstadoRepartidor estado) {
-        return repartidorRepository.findById(repartidorId)
-                .flatMap(repartidor -> {
-                    repartidor.setEstado(estado);
-                    return repartidorRepository.save(repartidor);
-                });
+        return repartidorRepository.actualizarEstado(repartidorId, estado)
+                .then(repartidorRepository.findById(repartidorId));
     }
 
     private Mono<Void> notificarCliente(Pedido pedido, String titulo, String mensaje) {
@@ -799,26 +964,20 @@ public class PedidoService {
                 .flatMap(this::enriquecer);
     }
 
-    // =====================================================================
-    // Firebase Storage deshabilitado temporalmente
-    // =====================================================================
-
     public Mono<PedidoDTO.Response> guardarEvidencia(String pedidoId,
                                                      String uidSolicitante,
                                                      byte[] contenido,
                                                      String contentType,
                                                      String nombreArchivo) {
-        return Mono.error(new OperacionInvalidaException(
-                "Firebase Storage está deshabilitado temporalmente"
-        ));
-    }
-
-    /*
-    public Mono<PedidoDTO.Response> guardarEvidencia(String pedidoId,
-                                                     String uidSolicitante,
-                                                     byte[] contenido,
-                                                     String contentType,
-                                                     String nombreArchivo) {
+        if (contenido == null || contenido.length == 0 || contenido.length > 2 * 1024 * 1024) {
+            return Mono.error(new OperacionInvalidaException(
+                    "El comprobante debe tener contenido y no superar 2 MB"));
+        }
+        List<String> tiposPermitidos = List.of("image/jpeg", "image/png", "image/webp", "application/pdf");
+        if (!tiposPermitidos.contains(contentType)) {
+            return Mono.error(new OperacionInvalidaException(
+                    "El comprobante debe ser JPG, PNG, WEBP o PDF"));
+        }
         return buscar(pedidoId)
                 .flatMap(pedido -> verificarPropietario(pedido, uidSolicitante)
                         .then(Mono.defer(() -> {
@@ -845,15 +1004,30 @@ public class PedidoService {
                                       byte[] contenido,
                                       String contentType,
                                       String nombreArchivo) {
-        String ruta = "evidencias/" + pedidoId + "/" + System.currentTimeMillis() + "-" + nombreArchivo;
+        String nombreSeguro = StringUtils.hasText(nombreArchivo)
+                ? nombreArchivo.replace('\\', '/').replaceAll("^.*/", "")
+                        .replaceAll("[^A-Za-z0-9._-]", "_")
+                : "comprobante";
+        if (nombreSeguro.length() > 100) {
+            nombreSeguro = nombreSeguro.substring(nombreSeguro.length() - 100);
+        }
+        String ruta = "evidencias/" + pedidoId + "/" + UUID.randomUUID() + "-" + nombreSeguro;
+        String tokenDescarga = UUID.randomUUID().toString();
 
         return Mono.fromCallable(() -> {
-            Blob blob = bucket.create(ruta, contenido, contentType);
-            blob.createAcl(Acl.of(Acl.User.ofAllUsers(), Acl.Role.READER));
-            return "https://storage.googleapis.com/" + bucket.getName() + "/" + ruta;
+            BlobInfo info = BlobInfo.newBuilder(storageBucketName, ruta)
+                    .setContentType(contentType)
+                    .setMetadata(java.util.Map.of("firebaseStorageDownloadTokens", tokenDescarga))
+                    .build();
+            Blob blob = storage.create(info, contenido);
+            if (blob == null) {
+                throw new IllegalStateException("No se pudo guardar el comprobante");
+            }
+            String objetoCodificado = URLEncoder.encode(ruta, StandardCharsets.UTF_8).replace("+", "%20");
+            return "https://firebasestorage.googleapis.com/v0/b/" + storageBucketName
+                    + "/o/" + objetoCodificado + "?alt=media&token=" + tokenDescarga;
         }).subscribeOn(Schedulers.boundedElastic());
     }
-    */
 
     private Mono<Void> verificarPropietario(Pedido pedido, String uidSolicitante) {
         return clienteRepository.findById(pedido.getClienteId())

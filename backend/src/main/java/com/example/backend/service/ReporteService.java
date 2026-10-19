@@ -1,6 +1,7 @@
 package com.example.backend.service;
 
 import com.example.backend.dto.ReporteDTO;
+import com.example.backend.exception.OperacionInvalidaException;
 import com.example.backend.model.DetallePedido;
 import com.example.backend.model.EstadoPedido;
 import com.example.backend.model.Incidencia;
@@ -137,7 +138,15 @@ public class ReporteService {
 
     /** Top N productos más vendidos, por cantidad total en líneas de pedido. */
     public Mono<List<ReporteDTO.ProductoMasVendidoDTO>> productosMasVendidos(int top) {
-        return detallePedidoRepository.findAll()
+        if (top < 1 || top > 100) {
+            return Mono.error(new OperacionInvalidaException("El parámetro top debe estar entre 1 y 100"));
+        }
+        return pedidoRepository.findAll()
+                .filter(pedido -> pedido.getEstado() == EstadoPedido.ENTREGADO)
+                .map(Pedido::getId)
+                .collect(Collectors.toSet())
+                .flatMapMany(pedidosEntregados -> detallePedidoRepository.findAll()
+                        .filter(detalle -> pedidosEntregados.contains(detalle.getPedidoId())))
                 .collectList()
                 .flatMap(detalles -> {
                     Map<String, List<DetallePedido>> porProducto = detalles.stream()

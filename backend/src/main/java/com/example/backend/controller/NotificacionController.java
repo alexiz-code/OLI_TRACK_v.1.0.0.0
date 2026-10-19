@@ -29,6 +29,7 @@ public class NotificacionController {
 
     @PatchMapping("/{id}/leida")
     public Mono<NotificacionDTO.Response> marcarLeida(@PathVariable String id) {
-        return notificacionService.marcarLeida(id);
+        return SecurityContextUtils.usuarioActual()
+                .flatMap(actual -> notificacionService.marcarLeida(id, actual.getUid()));
     }
 }

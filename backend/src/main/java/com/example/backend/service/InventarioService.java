@@ -6,14 +6,15 @@ import com.example.backend.exception.OperacionInvalidaException;
 import com.example.backend.exception.RecursoNoEncontradoException;
 import com.example.backend.mapper.EntityMapper;
 import com.example.backend.model.Inventario;
-import com.example.backend.model.Kardex;
-import com.example.backend.model.TipoMovimiento;
 import com.example.backend.repository.InventarioRepository;
 import com.example.backend.repository.KardexRepository;
 import com.example.backend.repository.ProductoRepository;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+
+import java.util.Map;
+import java.util.UUID;
 
 @Service
 public class InventarioService {
@@ -75,78 +76,38 @@ public class InventarioService {
      * cambiar stockActual: nunca se edita directamente.
      */
     public Mono<InventarioDTO.Response> registrarMovimiento(String inventarioId, InventarioDTO.MovimientoRequest request) {
-        return inventarioRepository.findById(inventarioId)
-                .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Inventario", inventarioId)))
-                .flatMap(inventario -> {
-                    int stockAnterior = inventario.getStockActual();
-                    return aplicarMovimiento(inventario, request)
-                            .flatMap(inventarioRepository::save)
-                            .flatMap(actualizado -> registrarKardex(actualizado.getProductoId(), request.getTipo(),
-                                    request.getCantidad(), stockAnterior, actualizado.getStockActual(), request.getMotivo())
-                                    .thenReturn(actualizado));
-                })
-                .map(mapper::toDTO);
-    }
-
-    private Mono<Inventario> aplicarMovimiento(Inventario inventario, InventarioDTO.MovimientoRequest request) {
-        int nuevoStock = switch (request.getTipo()) {
-            case ENTRADA -> inventario.getStockActual() + request.getCantidad();
-            case SALIDA -> inventario.getStockActual() - request.getCantidad();
-            case AJUSTE -> request.getCantidad();
-        };
-
-        if (nuevoStock < 0) {
-            return Mono.error(new OperacionInvalidaException(
-                    "El movimiento dejaría el stock en negativo (actual: " + inventario.getStockActual() +
-                            ", solicitado: " + request.getCantidad() + ")"));
+        if (request.getCantidad() == null || request.getCantidad() <= 0) {
+            return Mono.error(new OperacionInvalidaException("La cantidad debe ser mayor que cero"));
         }
-
-        inventario.setStockActual(nuevoStock);
-        return Mono.just(inventario);
-    }
-
-    private Mono<Kardex> registrarKardex(String productoId, TipoMovimiento tipo, int cantidad,
-                                          int stockAnterior, int stockNuevo, String motivo) {
-        Kardex kardex = new Kardex();
-        kardex.setProductoId(productoId);
-        kardex.setTipoMovimiento(tipo);
-        kardex.setCantidad(cantidad);
-        kardex.setStockAnterior(stockAnterior);
-        kardex.setStockNuevo(stockNuevo);
-        kardex.setMotivo(motivo);
-        return kardexRepository.save(kardex);
+        return inventarioRepository.aplicarMovimientoManual(
+                        inventarioId, request.getTipo(), request.getCantidad(), request.getMotivo())
+                .onErrorMap(error -> error instanceof IllegalStateException
+                                || error instanceof ArithmeticException,
+                        error -> error instanceof ArithmeticException
+                                ? new OperacionInvalidaException("El movimiento excede el límite permitido")
+                                : new OperacionInvalidaException(error.getMessage()))
+                .map(mapper::toDTO);
     }
 
     /** Devuelve stock al inventario (por ejemplo al cancelar un pedido) y deja línea de Kardex. */
     public Mono<Void> reponerPorProducto(String productoId, int cantidad, String motivo) {
-        return inventarioRepository.findByProductoId(productoId)
-                .flatMap(inventario -> {
-                    int stockAnterior = inventario.getStockActual();
-                    int nuevoStock = stockAnterior + cantidad;
-                    inventario.setStockActual(nuevoStock);
-                    return inventarioRepository.save(inventario)
-                            .flatMap(actualizado -> registrarKardex(productoId, TipoMovimiento.ENTRADA, cantidad,
-                                    stockAnterior, nuevoStock, motivo));
-                })
-                .then();
+        return inventarioRepository.aplicarMovimientoPedido("reposicion-manual-" + UUID.randomUUID(),
+                Map.of(productoId, cantidad), false, motivo);
     }
 
-    /** Descuenta stock al confirmar un pedido, y deja su propia línea de Kardex. */
+    /** Descuenta stock de forma transaccional y deja una línea de Kardex. */
     public Mono<Void> descontarPorProducto(String productoId, int cantidad) {
-        return inventarioRepository.findByProductoId(productoId)
-                .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Inventario para el producto", productoId)))
-                .flatMap(inventario -> {
-                    int stockAnterior = inventario.getStockActual();
-                    int nuevoStock = stockAnterior - cantidad;
-                    if (nuevoStock < 0) {
-                        return Mono.error(new OperacionInvalidaException(
-                                "Stock insuficiente para el producto " + productoId));
-                    }
-                    inventario.setStockActual(nuevoStock);
-                    return inventarioRepository.save(inventario)
-                            .flatMap(actualizado -> registrarKardex(productoId, TipoMovimiento.SALIDA, cantidad,
-                                    stockAnterior, nuevoStock, "Descuento automático por pedido"));
-                })
-                .then();
+        return inventarioRepository.aplicarMovimientoPedido("descuento-manual-" + UUID.randomUUID(),
+                Map.of(productoId, cantidad), true, "Descuento automático por pedido");
+    }
+
+    /** Reserva o repone todas las líneas de un pedido con validación transaccional en Firestore. */
+    public Mono<Void> aplicarMovimientoPedido(String pedidoId, Map<String, Integer> cantidades,
+                                              boolean descontar, String motivo) {
+        String operacionId = (descontar ? "reserva-" : "reposicion-") + pedidoId;
+        return inventarioRepository.aplicarMovimientoPedido(operacionId, cantidades, descontar, motivo)
+                .onErrorMap(error -> error instanceof IllegalStateException
+                                || error instanceof IllegalArgumentException,
+                        error -> new OperacionInvalidaException(error.getMessage()));
     }
 }

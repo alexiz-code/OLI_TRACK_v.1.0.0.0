@@ -32,6 +32,12 @@ public class ZonaController {
         return zonaService.listar();
     }
 
+    @GetMapping("/admin")
+    @PreAuthorize("hasRole('ADMINISTRADOR')")
+    public Flux<ZonaDTO.Response> listarTodas() {
+        return zonaService.listarTodas();
+    }
+
     @GetMapping("/{id}")
     public Mono<ZonaDTO.Response> obtenerPorId(@PathVariable String id) {
         return zonaService.obtenerPorId(id);

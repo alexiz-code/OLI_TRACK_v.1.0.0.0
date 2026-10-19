@@ -1,14 +1,18 @@
 package com.example.backend.service;
 
 import com.example.backend.dto.ClienteDTO;
+import com.example.backend.exception.ApiException;
 import com.example.backend.exception.OperacionInvalidaException;
 import com.example.backend.exception.RecursoNoEncontradoException;
 import com.example.backend.mapper.EntityMapper;
 import com.example.backend.model.Cliente;
+import com.example.backend.model.Pedido;
 import com.example.backend.model.Rol;
 import com.example.backend.repository.ClienteRepository;
+import com.example.backend.repository.PedidoRepository;
 import com.example.backend.repository.UsuarioRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.http.HttpStatus;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -22,15 +26,23 @@ public class ClienteService {
 
     private final ClienteRepository clienteRepository;
     private final UsuarioRepository usuarioRepository;
+    private final PedidoRepository pedidoRepository;
     private final EntityMapper mapper;
 
-    public ClienteService(ClienteRepository clienteRepository, UsuarioRepository usuarioRepository, EntityMapper mapper) {
+    public ClienteService(ClienteRepository clienteRepository, UsuarioRepository usuarioRepository,
+                          PedidoRepository pedidoRepository, EntityMapper mapper) {
         this.clienteRepository = clienteRepository;
         this.usuarioRepository = usuarioRepository;
+        this.pedidoRepository = pedidoRepository;
         this.mapper = mapper;
     }
 
-    public Mono<ClienteDTO.Response> crear(ClienteDTO.CrearRequest request) {
+    public Mono<ClienteDTO.Response> crear(String usuarioAutenticadoId, ClienteDTO.CrearRequest request) {
+        if (!usuarioAutenticadoId.equals(request.getUsuarioId())) {
+            return Mono.error(new ApiException(
+                    HttpStatus.FORBIDDEN,
+                    "El perfil solo se puede crear para el usuario autenticado"));
+        }
         return usuarioRepository.findById(request.getUsuarioId())
                 .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Usuario", request.getUsuarioId())))
                 .flatMap(usuario -> {
@@ -85,7 +97,17 @@ public class ClienteService {
     }
 
     public Flux<ClienteDTO.Response> listar() {
-        return clienteRepository.findAll().map(mapper::toDTO);
+        return pedidoRepository.findAll()
+                .filter(pedido -> pedido.getClienteId() != null && pedido.getCreadoEn() != null)
+                .collect(java.util.stream.Collectors.toMap(
+                        Pedido::getClienteId,
+                        Pedido::getCreadoEn,
+                        (anterior, reciente) -> anterior.after(reciente) ? anterior : reciente))
+                .flatMapMany(ultimosPedidos -> clienteRepository.findAll().map(cliente -> {
+                    ClienteDTO.Response response = mapper.toDTO(cliente);
+                    response.setUltimoPedidoEn(ultimosPedidos.get(cliente.getId()));
+                    return response;
+                }));
     }
 
     public Mono<ClienteDTO.Response> actualizar(String id, ClienteDTO.ActualizarRequest request) {

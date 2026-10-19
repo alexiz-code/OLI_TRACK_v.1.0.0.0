@@ -31,14 +31,28 @@ public class ProductoService {
 
     public Mono<ProductoDTO.Response> crear(ProductoDTO.CrearRequest request) {
         return productoRepository.save(mapper.toModel(request))
+                .flatMap(producto -> {
+                    Inventario inventario = new Inventario();
+                    inventario.setProductoId(producto.getId());
+                    inventario.setStockActual(request.getStockInicial() == null ? 0 : request.getStockInicial());
+                    inventario.setStockMinimo(0);
+                    inventario.setStockMaximo(0);
+                    return inventarioRepository.save(inventario)
+                            .thenReturn(producto)
+                            .onErrorResume(error -> productoRepository.deleteById(producto.getId())
+                                    .onErrorResume(limpiezaError -> Mono.empty())
+                                    .then(Mono.error(error)));
+                })
                 .flatMap(p -> auditService.registrarActual("PRODUCTO_CREADO", "producto", p.getId(), p.getNombre()).thenReturn(p))
-                .map(mapper::toDTO);
+                .flatMap(this::conStock);
     }
 
     public Mono<ProductoDTO.Response> obtenerPorId(String id) {
         return productoRepository.findById(id)
                 .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Producto", id)))
-                .flatMap(p -> conStock(Flux.just(p)).next());
+                .filter(Producto::isActivo)
+                .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Producto", id)))
+                .flatMap(this::conStock);
     }
 
     /** Catálogo completo (uso administrativo). */
@@ -52,7 +66,19 @@ public class ProductoService {
     }
 
     public Flux<ProductoDTO.Response> listarPorCategoria(String categoria) {
-        return conStock(productoRepository.findByCategoria(categoria));
+        return conStock(productoRepository.findByActivoTrue()
+                .filter(producto -> categoria.equals(producto.getCategoria())));
+    }
+
+    private Mono<ProductoDTO.Response> conStock(Producto producto) {
+        return inventarioRepository.findByProductoId(producto.getId())
+                .map(Inventario::getStockActual)
+                .defaultIfEmpty(0)
+                .map(stock -> {
+                    ProductoDTO.Response dto = mapper.toDTO(producto);
+                    dto.setStockDisponible(stock);
+                    return dto;
+                });
     }
 
     /** Une cada producto con su stock actual del inventario. */
@@ -80,7 +106,7 @@ public class ProductoService {
                 })
                 .flatMap(p -> auditService.registrarActual("PRODUCTO_ACTUALIZADO", "producto", p.getId(),
                         p.getNombre() + " · precio " + p.getPrecioUnitario()).thenReturn(p))
-                .map(mapper::toDTO);
+                .flatMap(this::conStock);
     }
 
     /** Baja lógica: el producto deja de aparecer en el catálogo pero no se borra. */

@@ -4,6 +4,7 @@ import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+import jakarta.validation.constraints.Min;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -45,6 +46,10 @@ public class ProductoDTO {
         private String unidadMedida;
 
         private String imagenUrl;
+
+        /** Stock inicial opcional para crear producto e inventario en una sola operación. */
+        @Min(value = 0, message = "El stock inicial no puede ser negativo")
+        private Integer stockInicial;
     }
 
     @Data

@@ -15,6 +15,7 @@ public final class Colecciones {
     public static final String DETALLE_PEDIDOS = "detallePedidos";
     public static final String INCIDENCIAS = "incidencias";
     public static final String KARDEX = "kardex";
+    public static final String OPERACIONES_STOCK_PEDIDOS = "operacionesStockPedidos";
     public static final String CONSULTAS = "consultas";
     public static final String NOTIFICACIONES = "notificaciones";
     public static final String ZONAS = "zonas";

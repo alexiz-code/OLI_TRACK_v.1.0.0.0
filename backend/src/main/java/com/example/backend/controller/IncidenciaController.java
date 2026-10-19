@@ -52,13 +52,28 @@ public class IncidenciaController {
     @GetMapping("/pedido/{pedidoId}")
     @PreAuthorize("hasAnyRole('ADMINISTRADOR', 'SUPERVISOR', 'REPARTIDOR')")
     public Flux<IncidenciaDTO.Response> listarPorPedido(@PathVariable String pedidoId) {
-        return incidenciaService.listarPorPedido(pedidoId);
+        return SecurityContextUtils.usuarioActual()
+                .flatMapMany(actual -> {
+                    if (actual.getRol().name().equals("REPARTIDOR")) {
+                        return repartidorService.obtenerPorUsuarioId(actual.getUid())
+                                .flatMapMany(repartidor -> incidenciaService.listarPorPedido(
+                                        pedidoId, repartidor.getId()));
+                    }
+                    return incidenciaService.listarPorPedido(pedidoId, null);
+                });
     }
 
     @GetMapping("/{id}")
     @PreAuthorize("hasAnyRole('ADMINISTRADOR', 'SUPERVISOR', 'REPARTIDOR')")
     public Mono<IncidenciaDTO.Response> obtenerPorId(@PathVariable String id) {
-        return incidenciaService.obtenerPorId(id);
+        return SecurityContextUtils.usuarioActual()
+                .flatMap(actual -> {
+                    if (actual.getRol().name().equals("REPARTIDOR")) {
+                        return repartidorService.obtenerPorUsuarioId(actual.getUid())
+                                .flatMap(repartidor -> incidenciaService.obtenerPorId(id, repartidor.getId()));
+                    }
+                    return incidenciaService.obtenerPorId(id, null);
+                });
     }
 
     @PatchMapping("/{id}/estado")
