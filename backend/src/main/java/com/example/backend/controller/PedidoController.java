@@ -229,10 +229,7 @@ public class PedidoController {
     public Mono<PedidoDTO.Response> validar(
             @PathVariable String id) {
 
-        return pedidoService.cambiarEstado(
-                id,
-                EstadoPedido.CONFIRMADO,
-                "Validado por supervisión");
+        return pedidoService.validar(id);
     }
 
     /**

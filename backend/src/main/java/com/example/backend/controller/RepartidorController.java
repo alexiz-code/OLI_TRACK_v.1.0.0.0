@@ -52,11 +52,24 @@ public class RepartidorController {
         return repartidorService.listarDisponibles();
     }
 
+    @GetMapping("/asignables")
+    @PreAuthorize("hasAnyRole('ADMINISTRADOR', 'SUPERVISOR')")
+    public Flux<RepartidorDTO.Response> listarAsignablesManualmente() {
+        return repartidorService.listarAsignablesManualmente();
+    }
+
     @GetMapping("/me")
     @PreAuthorize("hasRole('REPARTIDOR')")
     public Mono<RepartidorDTO.Response> obtenerPerfilPropio() {
         return SecurityContextUtils.usuarioActual()
                 .flatMap(actual -> repartidorService.obtenerPorUsuarioId(actual.getUid()));
+    }
+
+    @PostMapping("/me/iniciar-sesion")
+    @PreAuthorize("hasRole('REPARTIDOR')")
+    public Mono<RepartidorDTO.Response> iniciarSesionPropia() {
+        return SecurityContextUtils.usuarioActual()
+                .flatMap(actual -> repartidorService.prepararInicioSesion(actual.getUid()));
     }
 
     @GetMapping("/{id}")

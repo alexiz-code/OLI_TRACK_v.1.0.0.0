@@ -47,7 +47,7 @@ public class ConfiguracionService {
         c.setValidarHorarioAtencion(datos.isValidarHorarioAtencion());
         c.setLatitudCentral(datos.getLatitudCentral());
         c.setLongitudCentral(datos.getLongitudCentral());
-        c.setMetodosPagoHabilitados(new ArrayList<>(datos.getMetodosPagoHabilitados()));
+        c.setMetodosPagoHabilitados(metodosPagoPermitidos(datos.getMetodosPagoHabilitados()));
         c.setTiempoEstimadoEntregaMinutos(datos.getTiempoEstimadoEntregaMinutos());
         c.setUmbralRetrasoMinutos(datos.getUmbralRetrasoMinutos());
         c.setUmbralSinAsignarMinutos(datos.getUmbralSinAsignarMinutos());
@@ -63,8 +63,20 @@ public class ConfiguracionService {
         return new ConfiguracionDTO.Datos(
                 c.getNombre(), c.getRuc(), c.getDireccionCentral(), c.getTelefono(), c.getCorreo(),
                 c.getHorarioApertura(), c.getHorarioCierre(), c.getDiasAtencion(), c.isValidarHorarioAtencion(),
-                c.getLatitudCentral(), c.getLongitudCentral(), c.getMetodosPagoHabilitados(),
+                c.getLatitudCentral(), c.getLongitudCentral(), metodosPagoPermitidos(c.getMetodosPagoHabilitados()),
                 c.getTiempoEstimadoEntregaMinutos(), c.getUmbralRetrasoMinutos(), c.getUmbralSinAsignarMinutos());
+    }
+
+    private List<MetodoPago> metodosPagoPermitidos(List<MetodoPago> metodos) {
+        if (metodos == null) {
+            return List.of();
+        }
+        return metodos.stream()
+                .filter(metodo -> metodo == MetodoPago.EFECTIVO
+                        || metodo == MetodoPago.YAPE
+                        || metodo == MetodoPago.PLIN)
+                .distinct()
+                .toList();
     }
 
     private ConfiguracionEmpresa porDefecto() {
@@ -81,7 +93,11 @@ public class ConfiguracionService {
         c.setValidarHorarioAtencion(false);
         c.setLatitudCentral(-13.1635);
         c.setLongitudCentral(-74.2240);
-        c.setMetodosPagoHabilitados(new ArrayList<>(List.of(MetodoPago.values())));
+        c.setMetodosPagoHabilitados(new ArrayList<>(List.of(
+                MetodoPago.EFECTIVO,
+                MetodoPago.YAPE,
+                MetodoPago.PLIN
+        )));
         c.setTiempoEstimadoEntregaMinutos(30);
         c.setUmbralRetrasoMinutos(60);
         c.setUmbralSinAsignarMinutos(10);

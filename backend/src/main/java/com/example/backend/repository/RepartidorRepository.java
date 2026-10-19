@@ -29,6 +29,15 @@ public class RepartidorRepository extends FirestoreRepository<Repartidor> {
 
     /** Reclama de forma atómica un repartidor libre para impedir asignaciones simultáneas. */
     public Mono<Repartidor> reclamarDisponible(String repartidorId) {
+        return reclamarDisponible(repartidorId, false);
+    }
+
+    /** Un supervisor puede asignar explícitamente a un repartidor desconectado. */
+    public Mono<Repartidor> reclamarParaAsignacionManual(String repartidorId) {
+        return reclamarDisponible(repartidorId, true);
+    }
+
+    private Mono<Repartidor> reclamarDisponible(String repartidorId, boolean permitirDesconectado) {
         DocumentReference ref = collection().document(repartidorId);
         return com.example.backend.util.ReactiveFirebase.defer(() -> firestore.runTransaction(transaction -> {
             DocumentSnapshot snapshot = transaction.get(ref).get();
@@ -36,8 +45,10 @@ public class RepartidorRepository extends FirestoreRepository<Repartidor> {
                 throw new IllegalStateException("No existe el repartidor " + repartidorId);
             }
             Repartidor repartidor = snapshot.toObject(Repartidor.class);
-            if (repartidor == null || !repartidor.isActivo()
-                    || repartidor.getEstado() != EstadoRepartidor.DISPONIBLE) {
+            boolean estadoAsignable = repartidor != null
+                    && (repartidor.getEstado() == EstadoRepartidor.DISPONIBLE
+                    || permitirDesconectado && repartidor.getEstado() == EstadoRepartidor.DESCONECTADO);
+            if (repartidor == null || !repartidor.isActivo() || !estadoAsignable) {
                 throw new IllegalStateException("El repartidor no está activo y disponible");
             }
             transaction.update(ref, "estado", EstadoRepartidor.EN_RUTA.name());

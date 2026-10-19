@@ -4,6 +4,7 @@ import com.example.backend.dto.ReporteDTO;
 import com.example.backend.exception.OperacionInvalidaException;
 import com.example.backend.model.DetallePedido;
 import com.example.backend.model.EstadoPedido;
+import com.example.backend.model.HistorialEstado;
 import com.example.backend.model.Incidencia;
 import com.example.backend.model.Pedido;
 import com.example.backend.repository.DetallePedidoRepository;
@@ -19,8 +20,10 @@ import java.text.SimpleDateFormat;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.TimeZone;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
@@ -64,8 +67,10 @@ public class ReporteService {
                     .filter(p -> p.getEstado() == EstadoPedido.ENTREGADO && p.getEntregadoEn() != null)
                     .toList();
 
-            long conDemora = entregados.stream().filter(p -> minutosDeEntrega(p) > umbral).count();
-            double tiempoPromedio = entregados.stream().mapToLong(this::minutosDeEntrega).average().orElse(0);
+            long conDemora = entregados.stream()
+                    .filter(p -> minutosTotalesPedido(p).stream().anyMatch(minutos -> minutos > umbral))
+                    .count();
+            double tiempoPromedio = promedioRuta(entregados);
             BigDecimal ingresos = entregados.stream()
                     .map(Pedido::getTotal)
                     .filter(x -> x != null)
@@ -95,7 +100,9 @@ public class ReporteService {
         return porDia.entrySet().stream().map(entry -> {
             List<Pedido> delDia = entry.getValue();
             List<Pedido> entregadosDia = delDia.stream().filter(p -> p.getEstado() == EstadoPedido.ENTREGADO).toList();
-            long conDemora = entregadosDia.stream().filter(p -> minutosDeEntrega(p) > umbral).count();
+            long conDemora = entregadosDia.stream()
+                    .filter(p -> minutosTotalesPedido(p).stream().anyMatch(minutos -> minutos > umbral))
+                    .count();
             BigDecimal ingresos = entregadosDia.stream()
                     .map(Pedido::getTotal)
                     .filter(x -> x != null)
@@ -104,11 +111,45 @@ public class ReporteService {
         }).toList();
     }
 
-    private long minutosDeEntrega(Pedido pedido) {
+    private OptionalLong minutosTotalesPedido(Pedido pedido) {
         if (pedido.getCreadoEn() == null || pedido.getEntregadoEn() == null) {
-            return 0;
+            return OptionalLong.empty();
         }
-        return Duration.between(pedido.getCreadoEn().toInstant(), pedido.getEntregadoEn().toInstant()).toMinutes();
+        long minutos = Duration.between(
+                pedido.getCreadoEn().toInstant(),
+                pedido.getEntregadoEn().toInstant()).toMinutes();
+        return minutos >= 0 ? OptionalLong.of(minutos) : OptionalLong.empty();
+    }
+
+    private double promedioRuta(List<Pedido> entregados) {
+        return entregados.stream()
+                .map(this::minutosDeRuta)
+                .filter(OptionalLong::isPresent)
+                .mapToLong(OptionalLong::getAsLong)
+                .average()
+                .orElse(0);
+    }
+
+    private OptionalLong minutosDeRuta(Pedido pedido) {
+        Date destino = pedido.getLlegadaEn() != null
+                ? pedido.getLlegadaEn()
+                : pedido.getEntregadoEn();
+        if (destino == null || pedido.getHistorialEstados() == null) {
+            return OptionalLong.empty();
+        }
+
+        Date salida = pedido.getHistorialEstados().stream()
+                .filter(historial -> historial.getEstado() == EstadoPedido.EN_CAMINO)
+                .map(HistorialEstado::getFecha)
+                .filter(fecha -> fecha != null && !fecha.after(destino))
+                .max(Comparator.naturalOrder())
+                .orElse(null);
+        if (salida == null) {
+            return OptionalLong.empty();
+        }
+
+        long minutos = Duration.between(salida.toInstant(), destino.toInstant()).toMinutes();
+        return minutos >= 0 ? OptionalLong.of(minutos) : OptionalLong.empty();
     }
 
     /** HU-046: productividad por repartidor. */
@@ -129,7 +170,7 @@ public class ReporteService {
                                 .filter(p -> p.getEstado() == EstadoPedido.ENTREGADO && p.getEntregadoEn() != null)
                                 .toList();
                         long fallidas = lista.stream().filter(p -> p.getEstado() == EstadoPedido.ENTREGA_FALLIDA).count();
-                        double promedio = entregados.stream().mapToLong(this::minutosDeEntrega).average().orElse(0);
+                        double promedio = promedioRuta(entregados);
                         return new ReporteDTO.ProductividadDTO(e.getKey(), lista.size(), entregados.size(), fallidas,
                                 promedio, incidenciasPorRepartidor.getOrDefault(e.getKey(), 0L));
                     }).sorted(Comparator.comparingLong(ReporteDTO.ProductividadDTO::getPedidosEntregados).reversed()).toList();
@@ -176,17 +217,23 @@ public class ReporteService {
         SimpleDateFormat formato = new SimpleDateFormat("yyyy-MM-dd HH:mm");
         formato.setTimeZone(LIMA);
         return pedidoRepository.findAll().collectList().map(pedidos -> {
-            StringBuilder csv = new StringBuilder("Id,Fecha,Estado,ClienteId,RepartidorId,MetodoPago,Total,TiempoAtencionMin\n");
+            StringBuilder csv = new StringBuilder("Id,Fecha,Estado,ClienteId,RepartidorId,MetodoPago,Total,TiempoRutaMin\n");
             pedidos.stream()
                     .sorted(Comparator.comparing(Pedido::getCreadoEn, Comparator.nullsLast(Comparator.reverseOrder())))
-                    .forEach(p -> csv.append(p.getId()).append(',')
+                    .forEach(p -> {
+                        OptionalLong tiempoRuta = p.getEstado() == EstadoPedido.ENTREGADO
+                                ? minutosDeRuta(p)
+                                : OptionalLong.empty();
+                        csv.append(p.getId()).append(',')
                             .append(p.getCreadoEn() != null ? formato.format(p.getCreadoEn()) : "").append(',')
                             .append(p.getEstado()).append(',')
                             .append(p.getClienteId() != null ? p.getClienteId() : "").append(',')
                             .append(p.getRepartidorId() != null ? p.getRepartidorId() : "").append(',')
                             .append(p.getMetodoPago() != null ? p.getMetodoPago() : "").append(',')
                             .append(p.getTotal() != null ? p.getTotal() : "").append(',')
-                            .append(p.getEstado() == EstadoPedido.ENTREGADO ? minutosDeEntrega(p) : "").append('\n'));
+                            .append(tiempoRuta.isPresent() ? tiempoRuta.getAsLong() : "")
+                            .append('\n');
+                    });
             return csv.toString();
         });
     }

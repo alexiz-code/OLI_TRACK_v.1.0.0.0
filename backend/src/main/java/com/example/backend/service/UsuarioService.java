@@ -278,9 +278,13 @@ public class UsuarioService {
                                 );
                             }
 
-                            return usuarioRepository.save(
-                                    usuario
-                            );
+                            return usuarioRepository.save(usuario)
+                                    .flatMap(actualizado -> auditService.registrarActual(
+                                                    "USUARIO_ACTUALIZADO",
+                                                    "usuario",
+                                                    actualizado.getId(),
+                                                    actualizado.getEmail())
+                                            .thenReturn(actualizado));
                         }
                 )
 

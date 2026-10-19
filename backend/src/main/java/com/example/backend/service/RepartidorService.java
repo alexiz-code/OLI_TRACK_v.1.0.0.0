@@ -5,7 +5,9 @@ import com.example.backend.dto.UbicacionDTO;
 import com.example.backend.exception.OperacionInvalidaException;
 import com.example.backend.exception.RecursoNoEncontradoException;
 import com.example.backend.mapper.EntityMapper;
+import com.example.backend.model.EstadoPedido;
 import com.example.backend.model.EstadoRepartidor;
+import com.example.backend.model.Pedido;
 import com.example.backend.model.Repartidor;
 import com.example.backend.model.Rol;
 import com.example.backend.repository.RepartidorRepository;
@@ -17,6 +19,9 @@ import com.example.backend.exception.ApiException;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+
+import java.util.List;
+import java.util.Objects;
 
 @Service
 public class RepartidorService {
@@ -70,18 +75,113 @@ public class RepartidorService {
     public Mono<RepartidorDTO.Response> obtenerPorUsuarioId(String usuarioId) {
         return repartidorRepository.findByUsuarioId(usuarioId)
                 .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Perfil de repartidor para el usuario", usuarioId)))
+                .flatMap(this::sincronizarEstado)
+                .map(mapper::toDTO);
+    }
+
+    public Mono<RepartidorDTO.Response> prepararInicioSesion(String usuarioId) {
+        return repartidorRepository.findByUsuarioId(usuarioId)
+                .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de(
+                        "Perfil de repartidor para el usuario",
+                        usuarioId
+                )))
+                .flatMap(repartidor -> pedidoRepository.findByRepartidorId(repartidor.getId())
+                        .filter(pedido -> pedido.getEstado() != EstadoPedido.ENTREGADO
+                                && pedido.getEstado() != EstadoPedido.CANCELADO)
+                        .hasElements()
+                        .flatMap(tienePedidoActivo -> {
+                            EstadoRepartidor estadoInicial = tienePedidoActivo
+                                    ? EstadoRepartidor.EN_RUTA
+                                    : repartidor.isActivo()
+                                            ? EstadoRepartidor.DISPONIBLE
+                                            : EstadoRepartidor.DESCONECTADO;
+                            if (repartidor.getEstado() == estadoInicial) {
+                                return Mono.just(repartidor);
+                            }
+                            return repartidorRepository.actualizarEstado(
+                                            repartidor.getId(),
+                                            estadoInicial
+                                    )
+                                    .then(Mono.fromSupplier(() -> {
+                                        repartidor.setEstado(estadoInicial);
+                                        return repartidor;
+                                    }));
+                        }))
                 .map(mapper::toDTO);
     }
 
     public Flux<RepartidorDTO.Response> listar() {
-        return repartidorRepository.findAll().map(mapper::toDTO);
+        return sincronizarEstados()
+                .thenMany(repartidorRepository.findAll().map(mapper::toDTO));
     }
 
     /** Repartidores libres para que un administrador o cliente les asigne un pedido. */
     public Flux<RepartidorDTO.Response> listarDisponibles() {
-        return repartidorRepository.findByEstado(EstadoRepartidor.DISPONIBLE)
+        return sincronizarEstados()
+                .thenMany(repartidorRepository.findByEstado(EstadoRepartidor.DISPONIBLE))
                 .filter(Repartidor::isActivo)
                 .map(mapper::toDTO);
+    }
+
+    public Flux<RepartidorDTO.Response> listarAsignablesManualmente() {
+        return sincronizarEstados()
+                .thenMany(repartidorRepository.findAll())
+                .filter(Repartidor::isActivo)
+                .filter(repartidor -> repartidor.getEstado() == EstadoRepartidor.DISPONIBLE
+                        || repartidor.getEstado() == EstadoRepartidor.DESCONECTADO)
+                .flatMap(repartidor -> usuarioRepository.findById(repartidor.getUsuarioId())
+                        .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de(
+                                "Usuario del repartidor",
+                                repartidor.getUsuarioId()
+                        )))
+                        .map(usuario -> {
+                            RepartidorDTO.Response response = mapper.toDTO(repartidor);
+                            response.setNombreUsuario(usuario.getNombre());
+                            response.setEmailUsuario(usuario.getEmail());
+                            return response;
+                        }));
+    }
+
+    public Mono<Void> sincronizarEstados() {
+        return Mono.zip(
+                        repartidorRepository.findAll().collectList(),
+                        pedidoRepository.findAll().collectList()
+                )
+                .flatMapMany(datos -> Flux.fromIterable(datos.getT1())
+                        .concatMap(repartidor -> sincronizarEstado(repartidor, datos.getT2())))
+                .then();
+    }
+
+    private Mono<Repartidor> sincronizarEstado(Repartidor repartidor) {
+        return pedidoRepository.findByRepartidorId(repartidor.getId())
+                .collectList()
+                .flatMap(pedidos -> sincronizarEstado(repartidor, pedidos));
+    }
+
+    private Mono<Repartidor> sincronizarEstado(Repartidor repartidor, List<Pedido> pedidos) {
+        boolean tienePedidoActivo = pedidos.stream()
+                .anyMatch(pedido -> Objects.equals(pedido.getRepartidorId(), repartidor.getId())
+                        && pedido.getEstado() != EstadoPedido.ENTREGADO
+                        && pedido.getEstado() != EstadoPedido.CANCELADO);
+        EstadoRepartidor estadoCorrecto = repartidor.getEstado();
+        if (tienePedidoActivo) {
+            estadoCorrecto = EstadoRepartidor.EN_RUTA;
+        } else if (estadoCorrecto == EstadoRepartidor.EN_RUTA) {
+            estadoCorrecto = repartidor.isActivo()
+                    ? EstadoRepartidor.DISPONIBLE
+                    : EstadoRepartidor.DESCONECTADO;
+        }
+
+        if (estadoCorrecto == repartidor.getEstado()) {
+            return Mono.just(repartidor);
+        }
+
+        EstadoRepartidor nuevoEstado = estadoCorrecto;
+        return repartidorRepository.actualizarEstado(repartidor.getId(), nuevoEstado)
+                .then(Mono.fromSupplier(() -> {
+                    repartidor.setEstado(nuevoEstado);
+                    return repartidor;
+                }));
     }
 
     public Mono<RepartidorDTO.Response> actualizar(String id, RepartidorDTO.ActualizarRequest request) {

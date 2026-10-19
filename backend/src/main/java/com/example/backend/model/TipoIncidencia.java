@@ -5,5 +5,8 @@ public enum TipoIncidencia {
     PRODUCTO_DANADO,
     DIRECCION_INCORRECTA,
     CLIENTE_AUSENTE,
+    MECANICA,
+    TRAFICO,
+    OPERATIVO,
     OTRO
 }

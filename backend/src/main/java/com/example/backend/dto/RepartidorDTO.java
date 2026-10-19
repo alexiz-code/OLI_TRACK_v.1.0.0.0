@@ -2,6 +2,7 @@ package com.example.backend.dto;
 
 import com.example.backend.model.EstadoRepartidor;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -42,6 +43,7 @@ public class RepartidorDTO {
     @NoArgsConstructor
     @AllArgsConstructor
     public static class EstadoRequest {
+        @NotNull(message = "El estado del repartidor es obligatorio")
         private EstadoRepartidor estado;
     }
 
@@ -57,5 +59,7 @@ public class RepartidorDTO {
         private UbicacionDTO ubicacionActual;
         private boolean activo;
         private Date creadoEn;
+        private String nombreUsuario;
+        private String emailUsuario;
     }
 }

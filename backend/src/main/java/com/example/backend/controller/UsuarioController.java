@@ -60,6 +60,13 @@ public class UsuarioController {
                 .flatMap(actual -> usuarioService.actualizar(actual.getUid(), request));
     }
 
+    @PutMapping("/{id}")
+    @PreAuthorize("hasRole('ADMINISTRADOR')")
+    public Mono<UsuarioDTO.Response> actualizarUsuario(@PathVariable String id,
+                                                        @Valid @RequestBody UsuarioDTO.ActualizarRequest request) {
+        return usuarioService.actualizar(id, request);
+    }
+
     /** Baja lógica (no borra el documento ni el historial asociado). */
     @DeleteMapping("/{id}")
     @PreAuthorize("hasRole('ADMINISTRADOR')")

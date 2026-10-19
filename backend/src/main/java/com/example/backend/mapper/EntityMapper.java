@@ -133,7 +133,9 @@ public class EntityMapper {
                 model.getEstado(),
                 toDTO(model.getUbicacionActual()),
                 model.isActivo(),
-                model.getCreadoEn()
+                model.getCreadoEn(),
+                null,
+                null
         );
     }
 

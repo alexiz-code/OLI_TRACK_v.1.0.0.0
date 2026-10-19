@@ -3,6 +3,7 @@ package com.example.backend.service;
 import com.example.backend.dto.DetallePedidoDTO;
 import com.example.backend.dto.IncidenciaDTO;
 import com.example.backend.dto.PedidoDTO;
+import com.example.backend.dto.UbicacionDTO;
 import com.example.backend.exception.ApiException;
 import com.example.backend.exception.OperacionInvalidaException;
 import com.example.backend.exception.RecursoNoEncontradoException;
@@ -31,6 +32,8 @@ import com.example.backend.security.UsuarioAutenticado;
 import com.google.cloud.storage.Blob;
 import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.Storage;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -54,6 +57,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.text.Normalizer;
 import java.util.Locale;
@@ -64,12 +68,14 @@ import java.nio.charset.StandardCharsets;
 
 @Service
 public class PedidoService {
+    private static final Logger log = LoggerFactory.getLogger(PedidoService.class);
     private static final ZoneId ZONA_LIMA = ZoneId.of("America/Lima");
 
     private final PedidoRepository pedidoRepository;
     private final DetallePedidoRepository detallePedidoRepository;
     private final ProductoRepository productoRepository;
     private final RepartidorRepository repartidorRepository;
+    private final RepartidorService repartidorService;
     private final ClienteRepository clienteRepository;
     private final InventarioService inventarioService;
     private final NotificacionService notificacionService;
@@ -85,6 +91,7 @@ public class PedidoService {
                          DetallePedidoRepository detallePedidoRepository,
                          ProductoRepository productoRepository,
                          RepartidorRepository repartidorRepository,
+                         RepartidorService repartidorService,
                          ClienteRepository clienteRepository,
                          InventarioService inventarioService,
                          NotificacionService notificacionService,
@@ -97,6 +104,7 @@ public class PedidoService {
         this.detallePedidoRepository = detallePedidoRepository;
         this.productoRepository = productoRepository;
         this.repartidorRepository = repartidorRepository;
+        this.repartidorService = repartidorService;
         this.clienteRepository = clienteRepository;
         this.inventarioService = inventarioService;
         this.notificacionService = notificacionService;
@@ -143,12 +151,15 @@ public class PedidoService {
     public Mono<PedidoDTO.Response> crear(String clienteId, PedidoDTO.CrearRequest request) {
         return configuracionService.obtener()
                 .flatMap(cfg -> validarPedidoPermitido(cfg, request)
-                        .then(Flux.fromIterable(request.getProductos())
+                        .then(resolverUbicacionEntrega(clienteId, request.getUbicacionEntrega()))
+                        .flatMap(ubicacionEntrega -> Flux.fromIterable(request.getProductos())
                                 .flatMap(linea -> resolverLinea(linea)
                                         .switchIfEmpty(Mono.error(RecursoNoEncontradoException.de("Producto", linea.getProductoId()))))
                                 .collectList()
-                                .flatMap(lineas -> construirYGuardar(clienteId, request, cfg, lineas)
-                                        .flatMap(pedido -> pedido.getUbicacionEntrega() == null
+                                .flatMap(lineas -> construirYGuardar(
+                                        clienteId, request, cfg, lineas, ubicacionEntrega.orElse(null))
+                                        .flatMap(pedido -> !coordenadasValidas(
+                                                mapper.toModel(pedido.getUbicacionEntrega()))
                                                 ? Mono.just(pedido)
                                                 : asignarRepartidorAutomatico(pedido.getId())
                                                         .onErrorResume(OperacionInvalidaException.class, error ->
@@ -156,6 +167,20 @@ public class PedidoService {
                                                                         && error.getMessage().startsWith("No hay repartidores disponibles")
                                                                         ? Mono.just(pedido)
                                                                         : Mono.error(error))))));
+    }
+
+    private Mono<Optional<UbicacionDTO>> resolverUbicacionEntrega(
+            String clienteId,
+            UbicacionDTO ubicacionIndicada
+    ) {
+        if (coordenadasValidas(mapper.toModel(ubicacionIndicada))) {
+            return Mono.just(Optional.of(ubicacionIndicada));
+        }
+        return clienteRepository.findById(clienteId)
+                .flatMap(cliente -> Mono.justOrEmpty(cliente.getUbicacion()))
+                .filter(this::coordenadasValidas)
+                .map(ubicacion -> Optional.of(mapper.toDTO(ubicacion)))
+                .defaultIfEmpty(Optional.empty());
     }
 
     private Mono<Void> validarPedidoPermitido(ConfiguracionEmpresa cfg, PedidoDTO.CrearRequest request) {
@@ -235,7 +260,8 @@ public class PedidoService {
     private Mono<PedidoDTO.Response> construirYGuardar(String clienteId,
                                                        PedidoDTO.CrearRequest request,
                                                        ConfiguracionEmpresa cfg,
-                                                       List<DetallePedidoDTO> lineas) {
+                                                       List<DetallePedidoDTO> lineas,
+                                                       UbicacionDTO ubicacionEntrega) {
         BigDecimal total = lineas.stream()
                 .map(DetallePedidoDTO::getSubtotal)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -245,7 +271,7 @@ public class PedidoService {
         pedido.setEstado(EstadoPedido.PENDIENTE);
         pedido.setTotal(total);
         pedido.setDireccionEntrega(request.getDireccionEntrega());
-        pedido.setUbicacionEntrega(mapper.toModel(request.getUbicacionEntrega()));
+        pedido.setUbicacionEntrega(mapper.toModel(ubicacionEntrega));
         pedido.setObservaciones(request.getObservaciones());
         pedido.setMetodoPago(request.getMetodoPago());
         pedido.setCostoEnvio(BigDecimal.ZERO);
@@ -476,6 +502,14 @@ public class PedidoService {
     // =====================================================================
 
     public Mono<PedidoDTO.Response> asignarRepartidor(String pedidoId, String repartidorId) {
+        return asignarRepartidor(pedidoId, repartidorId, true);
+    }
+
+    private Mono<PedidoDTO.Response> asignarRepartidor(
+            String pedidoId,
+            String repartidorId,
+            boolean asignacionManual
+    ) {
         return uidActual()
                 .flatMap(uid -> buscar(pedidoId)
                         .flatMap(pedido -> {
@@ -490,7 +524,10 @@ public class PedidoService {
                             if (repartidorId.equals(pedido.getRepartidorId())) {
                                 return Mono.just(pedido);
                             }
-                            return repartidorRepository.reclamarDisponible(repartidorId)
+                            return repartidorService.sincronizarEstados()
+                                    .then(asignacionManual
+                                            ? repartidorRepository.reclamarParaAsignacionManual(repartidorId)
+                                            : repartidorRepository.reclamarDisponible(repartidorId))
                                     .onErrorMap(IllegalStateException.class,
                                             error -> new OperacionInvalidaException(error.getMessage()))
                                     .flatMap(repartidor -> {
@@ -543,7 +580,8 @@ public class PedidoService {
                         return Mono.error(new OperacionInvalidaException(
                                 "El pedido no tiene coordenadas para calcular la cercanía"));
                     }
-                    return repartidorRepository.findByEstado(EstadoRepartidor.DISPONIBLE)
+                    return repartidorService.sincronizarEstados()
+                            .thenMany(repartidorRepository.findByEstado(EstadoRepartidor.DISPONIBLE))
                             .filter(Repartidor::isActivo)
                             .filter(repartidor -> coordenadasValidas(
                                     repartidor.getUbicacionActual()))
@@ -552,7 +590,7 @@ public class PedidoService {
                                     .sorted(Comparator.comparingDouble(repartidor ->
                                             distanciaMetros(destino, repartidor.getUbicacionActual())))
                                     .toList()))
-                            .concatMap(repartidor -> asignarRepartidor(pedidoId, repartidor.getId())
+                            .concatMap(repartidor -> asignarRepartidor(pedidoId, repartidor.getId(), false)
                                     .onErrorResume(OperacionInvalidaException.class, error ->
                                             error.getMessage() != null
                                                     && error.getMessage().contains("no está activo y disponible")
@@ -674,6 +712,58 @@ public class PedidoService {
                         .flatMap(this::enriquecer));
     }
 
+    public Mono<PedidoDTO.Response> validar(String pedidoId) {
+        return buscar(pedidoId)
+                .flatMap(pedido -> {
+                    if (pedido.getEstado() == EstadoPedido.CONFIRMADO) {
+                        return StringUtils.hasText(pedido.getRepartidorId())
+                                || !coordenadasValidas(pedido.getUbicacionEntrega())
+                                ? enriquecer(pedido)
+                                : asignarAutomaticamenteSiHayRepartidor(
+                                        pedido.getId(),
+                                        pedido.getRepartidorId(),
+                                        pedido.getUbicacionEntrega(),
+                                        null
+                                );
+                    }
+                    if (pedido.getEstado() != EstadoPedido.PENDIENTE) {
+                        return Mono.error(new OperacionInvalidaException(
+                                "Solo se puede validar un pedido PENDIENTE; estado actual: " + pedido.getEstado()
+                        ));
+                    }
+                    return cambiarEstado(
+                                    pedidoId,
+                                    EstadoPedido.CONFIRMADO,
+                                    "Validado por supervisión"
+                            )
+                            .flatMap(confirmado -> asignarAutomaticamenteSiHayRepartidor(
+                                    pedidoId,
+                                    confirmado.getRepartidorId(),
+                                    pedido.getUbicacionEntrega(),
+                                    confirmado
+                            ));
+                });
+    }
+
+    private Mono<PedidoDTO.Response> asignarAutomaticamenteSiHayRepartidor(
+            String pedidoId,
+            String repartidorActual,
+            Ubicacion ubicacionEntrega,
+            PedidoDTO.Response pedidoActual
+    ) {
+        if (StringUtils.hasText(repartidorActual)
+                || !coordenadasValidas(ubicacionEntrega)) {
+            return Mono.just(pedidoActual);
+        }
+        return asignarRepartidorAutomatico(pedidoId)
+                .onErrorResume(OperacionInvalidaException.class, error ->
+                        error.getMessage() != null
+                                && (error.getMessage().startsWith("No hay repartidores disponibles")
+                                || error.getMessage().equals("El pedido ya tiene un repartidor asignado"))
+                                ? buscar(pedidoId).flatMap(this::enriquecer)
+                                : Mono.error(error));
+    }
+
     public Mono<PedidoDTO.Response> cambiarEstadoComo(String pedidoId,
                                                       EstadoPedido nuevoEstado,
                                                       String comentario,
@@ -714,10 +804,14 @@ public class PedidoService {
     public Mono<PedidoDTO.Response> rechazar(String pedidoId, String observaciones) {
         return buscar(pedidoId)
                 .flatMap(pedido -> {
+                    if (pedido.getEstado() == EstadoPedido.CANCELADO) {
+                        return enriquecer(pedido);
+                    }
                     if (pedido.getEstado() != EstadoPedido.PENDIENTE
                             && pedido.getEstado() != EstadoPedido.CONFIRMADO) {
                         return Mono.error(new OperacionInvalidaException(
-                                "Solo se puede rechazar un pedido PENDIENTE o CONFIRMADO"
+                                "Solo se puede rechazar un pedido PENDIENTE o CONFIRMADO; estado actual: "
+                                        + pedido.getEstado()
                         ));
                     }
 
@@ -1049,6 +1143,15 @@ public class PedidoService {
     private Mono<Void> verificarRepartidorAsignado(Pedido pedido, String uid) {
         return repartidorRepository.findByUsuarioId(uid)
                 .filter(r -> r.getId().equals(pedido.getRepartidorId()))
+                .switchIfEmpty(Mono.defer(() -> {
+                    log.warn(
+                            "Acceso de repartidor rechazado: pedido={}, repartidorAsignado={}, usuarioAutenticado={}",
+                            pedido.getId(),
+                            pedido.getRepartidorId(),
+                            uid
+                    );
+                    return Mono.empty();
+                }))
                 .switchIfEmpty(Mono.error(new ApiException(
                         HttpStatus.FORBIDDEN,
                         "Este pedido no está asignado al repartidor autenticado"

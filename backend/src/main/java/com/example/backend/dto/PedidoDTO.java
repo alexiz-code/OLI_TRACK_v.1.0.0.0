@@ -160,7 +160,7 @@ public class PedidoDTO {
         private boolean entregaAceptada;
         private Date llegadaEn;
         private Integer tiempoEstimadoMinutos;
-        /** Minutos entre creadoEn y entregadoEn (solo si ya fue entregado). */
+        /** Minutos desde la salida a ruta hasta la llegada al destino. */
         private Long tiempoAtencionMinutos;
     }
 
